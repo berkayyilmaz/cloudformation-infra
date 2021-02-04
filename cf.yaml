@@ -1,0 +1,214 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CFStack
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.32.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value:  !Join ['', [!Ref "AWS::StackName", "-VPC" ]]
+  
+  publicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      MapPublicIpOnLaunch: true
+      VpcId:
+        Ref: VPC
+      CidrBlock: 172.32.12.0/24
+      AvailabilityZone: "us-east-1a"
+      Tags:
+      - Key: Name
+        Value: PublicSubnet1
+  
+  publicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      MapPublicIpOnLaunch: true
+      VpcId:
+        Ref: VPC
+      CidrBlock: 172.32.13.0/24
+      AvailabilityZone: "us-east-1b"
+      Tags:
+      - Key: Name
+        Value: PublicSubnet2
+  
+  myRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:  
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: PublicRouteTable
+
+  myRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGW
+    Properties:
+       RouteTableId:
+         Ref: myRouteTable
+       DestinationCidrBlock: 0.0.0.0/0
+       GatewayId:
+         Ref: IGW
+
+  myLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties: 
+      LaunchTemplateData: 
+        ImageId: "ami-0885b1f6bd170450c"
+        InstanceType: t2.micro
+
+  myASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: '1'
+      MaxSize: '2'
+      DesiredCapacity: '1'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref myLaunchTemplate
+        Version: !GetAtt myLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier: 
+        - !Ref publicSubnet1
+        - !Ref publicSubnet2
+      TargetGroupARNs: 
+        - !Ref Test1TargetGroup
+      Tags:
+        - Key: Environment
+          Value: Test
+          PropagateAtLaunch: "true"
+        - Key: Purpose
+          Value: WebServerGroup
+          PropagateAtLaunch: "false"
+  
+
+  ALBSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "security group for ALB"
+      GroupName: "ALB-SG"
+      Tags: 
+        - Key: "Name"
+          Value: "albSg"
+      VpcId: !Ref VPC
+      SecurityGroupIngress: 
+        - CidrIp: "0.0.0.0/0"
+          FromPort: 80
+          IpProtocol: "tcp"
+          ToPort: 80
+        - CidrIp: "0.0.0.0/0"
+          FromPort: 443
+          IpProtocol: "tcp"
+          ToPort: 443
+
+  ApplicationLoadBalancer:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Name: "Application-Load-Balancer"
+      Scheme: "internet-facing"
+      Type: "application"
+      Subnets: 
+        - !Ref publicSubnet1
+        - !Ref publicSubnet2
+      SecurityGroups: 
+        - !Ref ALBSecurityGroup
+      IpAddressType: "ipv4"
+      LoadBalancerAttributes: 
+        - Key: "deletion_protection.enabled"
+          Value: "false"
+  
+  IGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+         Ref: VPC
+      InternetGatewayId:
+         Ref: IGW
+
+  #HTTPSListener:
+  #  Type: "AWS::ElasticLoadBalancingV2::Listener"
+  #  Properties:
+  #    LoadBalancerArn: !Ref ApplicationLoadBalancer
+  #    Port: 443
+  #    Protocol: "HTTPS"
+  #    SslPolicy: "ELBSecurityPolicy-2016-08"
+  #    Certificates: 
+  #      - CertificateArn: arn:aws:acm:eu-central-1:**************:certificate/*********************
+  #    DefaultActions: 
+  #      - Order: 1
+  #        TargetGroupArn: !Ref Test1TargetGroup
+  #        Type: "forward"
+
+  HTTPListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: "HTTP"
+      DefaultActions: 
+        - Order: 1
+          TargetGroupArn: !Ref Test1TargetGroup
+          Type: "forward"
+          #RedirectConfig: 
+          #    Protocol: "HTTPS"
+          #    Port: "443"
+          #    Host: "#{host}"
+          #    Path: "/#{path}"
+          #    Query: "#{query}"
+          #    StatusCode: "HTTP_301"
+          #Type: "redirect"
+
+  Test1TargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: "/"
+      Port: 443
+      Protocol: "HTTPS"
+      HealthCheckPort: "traffic-port"
+      HealthCheckProtocol: "HTTP"
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      TargetType: "instance"
+      Matcher: 
+        HttpCode: "200"
+      HealthyThresholdCount: 5
+      VpcId: !Ref VPC
+      Name: "target-group-1"
+      HealthCheckEnabled: true
+      TargetGroupAttributes: 
+        - Key: "stickiness.enabled"
+          Value: "false"
+        - Key: "deregistration_delay.timeout_seconds"
+          Value: "300"
+        - Key: "stickiness.type"
+          Value: "lb_cookie"
+        - Key: "stickiness.lb_cookie.duration_seconds"
+          Value: "86400"
+        - Key: "slow_start.duration_seconds"
+          Value: "0"
+        - Key: "load_balancing.algorithm.type"
+          Value: "round_robin"
+
+Outputs:        
+    ALB:
+        Description: The created loadbalancer
+        Value: !Ref ApplicationLoadBalancer
+
+    TargetGroup1:
+        Description: The created TargetGroup 1
+        Value: !Ref Test1TargetGroup
+
+    LoadBalancerSecurityGroup:
+        Description: the securty group for the ALB
+        Value: !Ref ALBSecurityGroup
